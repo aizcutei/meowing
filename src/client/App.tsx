@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DEFAULT_OPTIONS, type ConvertOptions } from "../core/options";
 import type { ConvertStats } from "../core/convert";
 import type { SingBoxConfig } from "../core/singbox";
-import { Button, SelectField, Section, Stat, TextField, Toggle } from "./ui";
+import { Button, SelectField, Section, Stat, TextArea, TextField, Toggle } from "./ui";
 
 interface ConvertResponse {
   config: SingBoxConfig;
@@ -255,6 +255,143 @@ function SourceCard({
   );
 }
 
+/** Matcher kinds offered by the builder, mirroring the DSL's prefixes. */
+const MATCHERS = [
+  { value: "suffix", label: "域名后缀", placeholder: "example.com" },
+  { value: "domain", label: "域名（完整匹配）", placeholder: "www.example.com" },
+  { value: "keyword", label: "域名关键词", placeholder: "google" },
+  { value: "regex", label: "域名正则", placeholder: "^ad\\..+" },
+  { value: "ip", label: "IP 段", placeholder: "10.0.0.0/8" },
+  { value: "geosite", label: "geosite 规则集", placeholder: "geolocation-!cn" },
+  { value: "geoip", label: "geoip 规则集", placeholder: "cn" },
+  { value: "port", label: "端口", placeholder: "443 或 1000-2000" },
+  { value: "process", label: "进程名", placeholder: "curl" },
+] as const;
+
+/** One-click matchers that need no value. */
+const PRESET_CHIPS = ["ads", "lan", "tailscale", "cn"] as const;
+
+/**
+ * Item 5: routing without writing sing-box JSON.
+ *
+ * The builder and the text area edit the same DSL, so anything the buttons can
+ * produce stays readable and hand-editable afterwards.
+ */
+function CustomRulesSection({
+  options,
+  set,
+}: {
+  options: ConvertOptions;
+  set: <K extends keyof ConvertOptions>(key: K, value: ConvertOptions[K]) => void;
+}) {
+  const [target, setTarget] = useState("proxy");
+  const [matcher, setMatcher] = useState<(typeof MATCHERS)[number]["value"]>("suffix");
+  const [value, setValue] = useState("");
+
+  const append = (line: string) => {
+    const current = options.customRules.replace(/\s+$/, "");
+    set("customRules", current === "" ? line : `${current}\n${line}`);
+    if (options.customRulesMode === "off") set("customRulesMode", "before");
+  };
+
+  const enabled = options.customRulesMode !== "off";
+
+  return (
+    <Section
+      title="自定义分流"
+      description="用一行一条的简单语法描述分流，可以替换或合并订阅自带的规则。"
+    >
+      <SelectField
+        label="与订阅规则的关系"
+        value={options.customRulesMode}
+        onChange={(v) => set("customRulesMode", v)}
+        options={[
+          { value: "off", label: "不使用" },
+          { value: "before", label: "放在订阅规则之前（优先生效）" },
+          { value: "after", label: "放在订阅规则之后（兜底）" },
+          { value: "replace", label: "完全替换订阅规则" },
+        ]}
+      />
+
+      {enabled ? (
+        <>
+          <div className="space-y-2 rounded-lg border border-white/10 bg-black/20 p-3">
+            <span className="text-xs font-medium text-zinc-400">可视化添加</span>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-24 flex-1">
+                <SelectField
+                  label="目标"
+                  value={target}
+                  onChange={setTarget}
+                  options={[
+                    { value: "proxy", label: "走代理" },
+                    { value: "direct", label: "直连" },
+                    { value: "reject", label: "拦截" },
+                  ]}
+                />
+              </div>
+              <div className="min-w-32 flex-1">
+                <SelectField
+                  label="匹配方式"
+                  value={matcher}
+                  onChange={(v) => setMatcher(v as typeof matcher)}
+                  options={MATCHERS.map((m) => ({ value: m.value, label: m.label }))}
+                />
+              </div>
+              <div className="min-w-40 flex-[2]">
+                <TextField
+                  label="内容"
+                  mono
+                  value={value}
+                  onChange={setValue}
+                  placeholder={MATCHERS.find((m) => m.value === matcher)?.placeholder}
+                />
+              </div>
+              <Button
+                variant="secondary"
+                disabled={value.trim() === ""}
+                onClick={() => {
+                  append(`${target}\t${matcher}:${value.trim()}`);
+                  setValue("");
+                }}
+              >
+                添加
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-xs text-zinc-500">常用：</span>
+              {PRESET_CHIPS.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => append(`${chip === "ads" ? "reject" : "direct"}\t${chip}`)}
+                  className="rounded-md border border-white/10 bg-white/5 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-white/10"
+                >
+                  {chip === "ads" ? "拦截广告" : chip === "lan" ? "局域网直连" : chip === "cn" ? "国内直连" : "Tailscale 直连"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <TextArea
+            label="规则"
+            value={options.customRules}
+            onChange={(v) => set("customRules", v)}
+            rows={8}
+            placeholder={"reject\tads\ndirect\tlan, tailscale\nproxy\tgeosite:geolocation-!cn\nfinal\tproxy"}
+            hint="每行 “目标 匹配[, 匹配…]”。同一行的多个匹配是「或」，用 & 连接则是「与」。final 指定兜底目标。# 开头为注释。"
+          />
+          {options.customRules.trim() !== "" ? (
+            <Button variant="ghost" onClick={() => set("customRules", "")}>
+              清空规则
+            </Button>
+          ) : null}
+        </>
+      ) : null}
+    </Section>
+  );
+}
+
 function OptionsPanel({
   options,
   set,
@@ -302,21 +439,51 @@ function OptionsPanel({
       </Section>
 
       <Section title="DNS" description="使用 sing-box 1.12+ 的新版 DNS 服务器格式。">
-        <TextField
-          label="代理 DNS"
-          mono
-          value={options.remoteDns}
-          onChange={(v) => set("remoteDns", v)}
-          placeholder="https://1.1.1.1/dns-query"
-          hint="走代理解析。支持 https / h3 / tls / quic / tcp / udp。"
+        <SelectField
+          label="DNS 方案"
+          value={options.dnsPreset}
+          onChange={(v) => set("dnsPreset", v)}
+          options={[
+            { value: "china", label: "国内预置（阿里 DoT + 字节 / Google DoT）" },
+            { value: "manual", label: "手动指定" },
+          ]}
+          hint={
+            options.dnsPreset === "china"
+              ? "国内域名走阿里 DoT 与字节 DNS，其余走 Google DoT。加密 DNS 均以 IP 直连并用 SNI 指定域名，无需再解析 DNS 服务器本身。"
+              : undefined
+          }
         />
-        <TextField
-          label="直连 DNS"
-          mono
-          value={options.localDns}
-          onChange={(v) => set("localDns", v)}
-          placeholder="https://223.5.5.5/dns-query"
-        />
+        {options.dnsPreset === "china" ? (
+          <Toggle
+            label="国内 DNS 并发查询"
+            hint={
+              options.targetVersion === "1.13"
+                ? "需要 sing-box 1.14；当前目标为 1.13，将退回按规则分流。"
+                : "同时查询阿里与字节，取最先返回的可用结果。仅用于国内域名 —— 国外域名交由 FakeIP，不做解析。"
+            }
+            checked={options.dnsRace}
+            onChange={(v) => set("dnsRace", v)}
+            disabled={options.targetVersion === "1.13"}
+          />
+        ) : (
+          <>
+            <TextField
+              label="代理 DNS"
+              mono
+              value={options.remoteDns}
+              onChange={(v) => set("remoteDns", v)}
+              placeholder="https://1.1.1.1/dns-query"
+              hint="走代理解析。支持 https / h3 / tls / quic / tcp / udp。"
+            />
+            <TextField
+              label="直连 DNS"
+              mono
+              value={options.localDns}
+              onChange={(v) => set("localDns", v)}
+              placeholder="https://223.5.5.5/dns-query"
+            />
+          </>
+        )}
         <SelectField
           label="解析策略"
           value={options.dnsStrategy}
@@ -335,7 +502,68 @@ function OptionsPanel({
           onChange={(v) => set("fakeIp", v)}
           disabled={!options.tun}
         />
+        {options.fakeIp ? (
+          <Toggle
+            label="局域网与 Tailscale 返回真实 IP"
+            hint="内网域名（.local / .lan / .home.arpa / .internal）与反向解析走系统 DNS，其余外部域名才返回 FakeIP。注意：FakeIP 是在查询阶段决定的，此时还没有地址，因此只能按域名后缀豁免，无法按 IP 段豁免。"
+            checked={options.realIpLocal}
+            onChange={(v) => set("realIpLocal", v)}
+          />
+        ) : null}
       </Section>
+
+      <Section
+        title="Tailscale"
+        description="可选。加入 tailnet，并把发往 tailnet 的流量交给它。"
+      >
+        <Toggle
+          label="启用 Tailscale"
+          hint="以 endpoints 形式加入组网；分流会优先判断目标是否属于 tailnet。"
+          checked={options.tailscale}
+          onChange={(v) => set("tailscale", v)}
+        />
+        {options.tailscale ? (
+          <>
+            <TextField
+              label="Auth Key（可选）"
+              mono
+              type="password"
+              value={options.tailscaleAuthKey}
+              onChange={(v) => set("tailscaleAuthKey", v)}
+              placeholder="留空则首次启动时用登录链接授权"
+              hint="填了会被写进配置和订阅链接里，等同于凭据。留空更安全 —— sing-box 会在日志里打印一次性登录地址。"
+            />
+            <TextField
+              label="主机名（可选）"
+              value={options.tailscaleHostname}
+              onChange={(v) => set("tailscaleHostname", v)}
+              placeholder="sing-box"
+            />
+            <TextField
+              label="状态目录"
+              mono
+              value={options.tailscaleStateDir}
+              onChange={(v) => set("tailscaleStateDir", v)}
+              hint="保存 tailnet 身份，需可写且重启后保持不变。相对路径位于 sing-box 的工作目录内。"
+            />
+            <Toggle
+              label="接受子网路由"
+              hint="接受其他节点公告的子网路由（accept_routes）。"
+              checked={options.tailscaleAcceptRoutes}
+              onChange={(v) => set("tailscaleAcceptRoutes", v)}
+            />
+            <TextField
+              label="出口节点（可选）"
+              value={options.tailscaleExitNode}
+              onChange={(v) => set("tailscaleExitNode", v)}
+              placeholder="留空则不使用出口节点"
+              hint="填写后非 tailnet 流量将经由该出口节点，而非订阅里的代理。"
+            />
+          </>
+        ) : null}
+      </Section>
+
+      <CustomRulesSection options={options} set={set} />
 
       <Section title="规则">
         <Toggle

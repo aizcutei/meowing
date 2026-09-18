@@ -128,6 +128,41 @@ export function TextField({
   );
 }
 
+export function TextArea({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+  rows = 8,
+  invalid,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  hint?: string;
+  rows?: number;
+  invalid?: boolean;
+}) {
+  return (
+    <label className="block space-y-1.5">
+      <span className="text-xs font-medium text-zinc-400">{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        spellCheck={false}
+        className={`w-full resize-y rounded-lg border bg-black/30 px-3 py-2 font-mono text-[13px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 ${
+          invalid ? "border-rose-500/60" : "border-white/10"
+        }`}
+      />
+      {hint ? <span className="block text-xs text-zinc-500">{hint}</span> : null}
+    </label>
+  );
+}
+
 export function SelectField<T extends string>({
   label,
   value,
