@@ -12,6 +12,7 @@ import { BLOCK_TAG, DIRECT_TAG, convertGroups, resolveBuiltinTarget } from "./gr
 import { UnsupportedProxyError, convertProxy } from "./outbounds";
 import type { ConvertOptions } from "./options";
 import { convertRules, type RuleTarget, type RulesResult } from "./rules";
+import { parseCustomRules, type CustomRulesResult } from "./custom-rules";
 import type {
   Outbound,
   ProxyOutbound,
@@ -26,6 +27,7 @@ import {
   buildDns,
   buildExperimental,
   buildInbounds,
+  buildEndpoints,
   buildLeadingRules,
   buildLog,
   buildTrailingRules,
@@ -288,7 +290,12 @@ export function convertClashToSingBox(
     finalRejects: false,
     stats: { parsed: 0, skipped: 0, emitted: 0 },
   };
-  if (options.convertRules && clash.rules.length > 0) {
+  const useCustomRules = options.customRulesMode !== "off" && options.customRules.trim() !== "";
+  // `replace` means the subscription's rules are ignored entirely.
+  const wantSourceRules =
+    options.convertRules && !(useCustomRules && options.customRulesMode === "replace");
+
+  if (wantSourceRules && clash.rules.length > 0) {
     rulesResult = convertRules(clash.rules, {
       resolveTarget,
       ruleProviders: clash.ruleProviders,
@@ -299,6 +306,36 @@ export function convertClashToSingBox(
     });
   } else if (!options.convertRules) {
     warn("Source rules were not converted; only the built-in default rules apply.");
+  } else if (useCustomRules && options.customRulesMode === "replace") {
+    warn("Source rules were replaced by the custom ruleset.");
+  }
+
+  /* --- custom rules ----------------------------------------------------- */
+
+  let customResult: CustomRulesResult | undefined;
+  if (useCustomRules) {
+    customResult = parseCustomRules(options.customRules, {
+      resolveTarget: (name) => {
+        // `proxy` is the DSL's word for "whatever the main policy group is", which
+        // has no Clash equivalent and so is not something resolveTarget knows.
+        const word = name.trim().toLowerCase();
+        if (word === "proxy") return { kind: "route", outbound: mainTag! };
+        const resolved = resolveTarget(name);
+        if (resolved.kind === "route") return { kind: "route", outbound: resolved.outbound };
+        if (resolved.kind === "reject") return { kind: "reject" };
+        return { kind: "unknown" };
+      },
+      ruleSetSource: options.ruleSetSource,
+      ruleSetUpdateInterval: "1d",
+      ...(legacyDownloadDetour ? { ruleSetDownloadDetour: legacyDownloadDetour } : {}),
+    });
+    if (customResult.errors.length > 0) {
+      // Misrouted traffic is worse than a failed conversion, so refuse to guess.
+      throw new ConversionError(
+        `Custom ruleset has ${customResult.errors.length} error(s):\n${customResult.errors.join("\n")}`,
+      );
+    }
+    warnings.push(...customResult.warnings);
   }
 
   const dnsResult = buildDns(options, mainTag!);
@@ -308,6 +345,7 @@ export function convertClashToSingBox(
 
   const ruleSets = new Map<string, RuleSet>();
   for (const set of rulesResult.ruleSets) ruleSets.set(set.tag, set);
+  for (const set of customResult?.ruleSets ?? []) ruleSets.set(set.tag, set);
   const extraSets: Array<{ kind: "geosite" | "geoip"; name: string }> = [
     ...dnsResult.requiredRuleSets,
   ];
@@ -347,12 +385,25 @@ export function convertClashToSingBox(
     outbounds.push({ type: "block", tag: BLOCK_TAG });
   }
 
+  const endpoints = buildEndpoints(options);
+  if (options.tailscale && options.tailscaleAuthKey) {
+    warn(
+      "The Tailscale auth key is embedded in the generated config and subscription link; " +
+        "leave it blank to log in via the URL sing-box prints on first start instead.",
+    );
+  }
+
+  const customRules = customResult?.rules ?? [];
   const routeRules: RouteRule[] = [
     ...buildLeadingRules(options, mainTag!),
+    ...(options.customRulesMode === "before" || options.customRulesMode === "replace"
+      ? customRules
+      : []),
     ...rulesResult.rules,
+    ...(options.customRulesMode === "after" ? customRules : []),
     ...buildTrailingRules(options),
   ];
-  if (rulesResult.finalRejects) {
+  if (rulesResult.finalRejects || customResult?.finalRejects) {
     // `MATCH,REJECT` cannot be expressed as `route.final`, which must name an
     // outbound; a matcher-less reject rule at the very end is equivalent.
     routeRules.push({ action: "reject" });
@@ -376,10 +427,12 @@ export function convertClashToSingBox(
       : {}),
     inbounds: buildInbounds(options),
     outbounds,
+    ...(endpoints.length > 0 ? { endpoints } : {}),
     route: {
       rules: routeRules,
       rule_set: [...ruleSets.values()],
-      final: rulesResult.final ?? mainTag!,
+      // A custom `final` wins: it is the more explicit statement of intent.
+      final: customResult?.final ?? rulesResult.final ?? mainTag!,
       auto_detect_interface: true,
       // Proxy server hostnames resolve through the direct resolver rather than
       // the system one: it is reached by IP, so it needs no bootstrapping, and it
@@ -448,7 +501,12 @@ function firstSelectorTag(
  * falls back to `direct` rather than being deleted, so the config stays valid.
  */
 function pruneDanglingReferences(config: SingBoxConfig, warn: (msg: string) => void): number {
-  const known = new Set((config.outbounds ?? []).map((o) => o.tag));
+  // Endpoints share the outbound tag namespace, so a rule may legitimately name
+  // one; leaving them out here would silently delete every Tailscale rule.
+  const known = new Set([
+    ...(config.outbounds ?? []).map((o) => o.tag),
+    ...(config.endpoints ?? []).map((e) => e.tag),
+  ]);
   let removed = 0;
 
   for (const outbound of config.outbounds ?? []) {

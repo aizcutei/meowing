@@ -21,9 +21,44 @@ export interface SingBoxConfig {
   http_clients?: HttpClient[];
   inbounds?: Inbound[];
   outbounds?: Outbound[];
+  /** Bidirectional protocols (WireGuard, Tailscale). Present since sing-box 1.11. */
+  endpoints?: Endpoint[];
   route?: RouteOptions;
   experimental?: ExperimentalOptions;
 }
+
+/**
+ * A Tailscale endpoint.
+ *
+ * Endpoints are not outbounds: they also accept inbound connections, which is why
+ * a tailnet cannot be modelled as an outbound. They do share the outbound tag
+ * namespace, so a route rule reaches one through the ordinary `outbound` field.
+ */
+export interface TailscaleEndpoint {
+  type: "tailscale";
+  tag: string;
+  /** Where tailnet identity is persisted. Without it, every restart re-authenticates. */
+  state_directory?: string;
+  auth_key?: string;
+  control_url?: string;
+  ephemeral?: boolean;
+  hostname?: string;
+  /** Accept subnet routes advertised by peers. */
+  accept_routes?: boolean;
+  exit_node?: string;
+  exit_node_allow_lan_access?: boolean;
+  advertise_routes?: string[];
+  advertise_exit_node?: boolean;
+  udp_timeout?: string;
+  /** Use a real OS TUN interface instead of the userspace netstack. */
+  system_interface?: boolean;
+  system_interface_name?: string;
+  system_interface_mtu?: number;
+  detour?: string;
+  domain_resolver?: DomainResolveOptions | string;
+}
+
+export type Endpoint = TailscaleEndpoint;
 
 /**
  * A named HTTP client, introduced in sing-box 1.14 for things the router itself
@@ -350,6 +385,11 @@ export type DnsServer =
       server_port?: number;
       detour?: string;
       domain_resolver?: DomainResolveOptions | string;
+      /**
+       * Lets a DoT/DoQ server be addressed by IP while still presenting the right
+       * SNI, which removes the need to resolve the resolver.
+       */
+      tls?: TlsOptions;
     }
   | {
       type: "https" | "h3";
@@ -360,7 +400,20 @@ export type DnsServer =
       detour?: string;
       domain_resolver?: DomainResolveOptions | string;
     }
-  | { type: "fakeip"; tag: string; inet4_range?: string; inet6_range?: string };
+  | { type: "fakeip"; tag: string; inet4_range?: string; inet6_range?: string }
+  | {
+      /**
+       * Resolves through a tailnet. Notably does *not* embed dial fields, so it
+       * takes no `detour` or `domain_resolver`.
+       */
+      type: "tailscale";
+      tag: string;
+      /** Tag of a `tailscale` endpoint. */
+      endpoint: string;
+      accept_default_resolvers?: boolean;
+      /** sing-box 1.14+ only. */
+      accept_search_domain?: boolean;
+    };
 
 export interface DnsRule {
   /** Present only on `default` rules. */
@@ -373,13 +426,31 @@ export interface DnsRule {
   clash_mode?: string;
   ip_accept_any?: boolean;
   invert?: boolean;
+  /**
+   * Matches destinations the named outbounds or DNS servers claim as their own.
+   * For a tailnet that means live MagicDNS names and peers' advertised subnet
+   * routes, so it tracks the tailnet instead of hardcoding ranges.
+   */
+  preferred_by?: string[];
   /** Present only on `logical` rules. */
   type?: "logical";
   mode?: "and" | "or";
   rules?: DnsRule[];
-  /** Action. `server` implies `action: "route"`. */
-  action?: "route" | "route-options" | "reject" | "predefined";
+  /**
+   * Action. `server` implies `action: "route"`.
+   *
+   * `evaluate` (1.14+) queries a server and stores the answer under `tag` without
+   * ending rule matching, which is what makes concurrent queries possible.
+   */
+  action?: "route" | "route-options" | "reject" | "predefined" | "evaluate" | "respond";
   server?: string;
+  /** Names the stored response of an `evaluate` rule. */
+  tag?: string;
+  /** Matches against a stored response rather than the query. Required by `race`. */
+  match_response?: boolean | string;
+  /** First matching response wins, regardless of rule order. Needs `match_response`. */
+  race?: boolean;
+  response_rcode?: string;
   strategy?: DomainStrategy;
   disable_cache?: boolean;
   rewrite_ttl?: number;
@@ -440,6 +511,12 @@ export interface RouteRule {
   wifi_bssid?: string[];
   rule_set?: string[];
   rule_set_ip_cidr_match_source?: boolean;
+  /**
+   * Matches destinations the named outbounds/endpoints claim. Unlike a static
+   * CIDR this follows a tailnet's live MagicDNS names and advertised subnet
+   * routes. Tags here *are* validated at startup, unlike `outbound`.
+   */
+  preferred_by?: string[];
   invert?: boolean;
   /** `logical` rule. */
   type?: "logical";

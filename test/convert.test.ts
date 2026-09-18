@@ -310,6 +310,23 @@ describe("option variations produce valid configs", () => {
     ["ipv6", { dnsStrategy: "prefer_ipv6" as const }],
     ["plain-dns", { remoteDns: "tls://8.8.8.8", localDns: "udp://223.5.5.5" }],
     ["direct-rulesets", { ruleSetDetour: "direct" as const }],
+    ["dns-manual", { dnsPreset: "manual" as const }],
+    ["dns-no-race", { dnsRace: false }],
+    ["tailscale", { tailscale: true }],
+    ["tailscale-fakeip", { tailscale: true, fakeIp: true, realIpLocal: true }],
+    ["tailscale-exit-node", { tailscale: true, tailscaleExitNode: "exit-1" }],
+    ["no-real-ip-local", { fakeIp: true, realIpLocal: false }],
+    [
+      "custom-rules-replace",
+      {
+        customRulesMode: "replace" as const,
+        customRules: "reject ads\ndirect lan, tailscale\nproxy geosite:geolocation-!cn\nfinal proxy",
+      },
+    ],
+    [
+      "custom-rules-after",
+      { customRulesMode: "after" as const, customRules: "direct suffix:corp.internal" },
+    ],
   ];
 
   for (const [name, overrides] of variations) {
@@ -319,6 +336,126 @@ describe("option variations produce valid configs", () => {
       singBoxCheck(result.config, `example-${name}`);
     });
   }
+
+  it("keeps Tailscale rules, whose tag is an endpoint rather than an outbound", () => {
+    const { options } = normaliseOptions({ ...DEFAULT_OPTIONS, tailscale: true });
+    const result = convertClashToSingBox(EXAMPLE, options);
+    expect(result.config.endpoints).toHaveLength(1);
+    expect(result.config.endpoints![0]).toMatchObject({ type: "tailscale", tag: "tailscale" });
+    // Dangling-reference pruning works off outbound tags; if it does not also know
+    // about endpoints it silently deletes every one of these.
+    const toTailnet = result.config.route!.rules!.filter((r) => r.outbound === "tailscale");
+    expect(toTailnet).toHaveLength(3);
+    expect(toTailnet[0]).toMatchObject({ preferred_by: ["tailscale"] });
+  });
+
+  it("exempts tailnet and LAN names from FakeIP by ordering them first", () => {
+    const { options } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      tailscale: true,
+      fakeIp: true,
+      realIpLocal: true,
+    });
+    const rules = convertClashToSingBox(EXAMPLE, options).config.dns!.rules!;
+    const fakeIpIndex = rules.findIndex((r) => r.server === "dns-fakeip");
+    expect(fakeIpIndex).toBeGreaterThan(-1);
+    // FakeIP is a catch-all, so every exemption has to precede it.
+    expect(rules.findIndex((r) => r.server === "dns-tailscale")).toBeLessThan(fakeIpIndex);
+    expect(rules.findIndex((r) => r.domain_suffix?.includes("lan"))).toBeLessThan(fakeIpIndex);
+    expect(fakeIpIndex).toBe(rules.length - 1);
+  });
+
+  it("never puts an IP matcher in a DNS rule, which sing-box rejects there", () => {
+    const { options } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      fakeIp: true,
+      realIpLocal: true,
+      tailscale: true,
+    });
+    for (const rule of convertClashToSingBox(EXAMPLE, options).config.dns!.rules!) {
+      // The FakeIP decision happens on the query, before any address is known, so
+      // sing-box requires `match_response` for these and fails startup otherwise.
+      expect(rule).not.toHaveProperty("ip_cidr");
+      expect(rule).not.toHaveProperty("ip_is_private");
+    }
+  });
+
+  it("races the two domestic resolvers rather than domestic against foreign", () => {
+    const { options } = normaliseOptions({ ...DEFAULT_OPTIONS, dnsRace: true });
+    const config = convertClashToSingBox(EXAMPLE, options).config;
+    const evaluates = config.dns!.rules!.filter((r) => r.action === "evaluate");
+    expect(evaluates).toHaveLength(2);
+    expect(evaluates.map((r) => r.server)).toEqual(["dns-local", "dns-local-alt"]);
+    // Racing foreign DNS too would answer everything and leave FakeIP unreachable.
+    expect(evaluates.every((r) => r.rule_set?.includes("geosite-cn"))).toBe(true);
+    for (const rule of config.dns!.rules!.filter((r) => r.race)) {
+      expect(rule.match_response).toBeTruthy();
+    }
+  });
+
+  it("drops concurrent DNS when targeting 1.13, which has no evaluate action", () => {
+    const { options, rejected } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      targetVersion: "1.13",
+      dnsRace: true,
+    });
+    expect(options.dnsRace).toBe(false);
+    expect(rejected.join(" ")).toMatch(/1\.14/);
+    const config = convertClashToSingBox(EXAMPLE, options).config;
+    expect(config.dns!.rules!.some((r) => r.action === "evaluate")).toBe(false);
+    // 1.13 rejects `preferred_by` on DNS rules, though it allows it on route rules.
+    expect(config.dns!.rules!.some((r) => r.preferred_by)).toBe(false);
+  });
+
+  it("targeting 1.13 with Tailscale is accepted by 1.13", () => {
+    const { options } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      targetVersion: "1.13",
+      tailscale: true,
+      fakeIp: true,
+    });
+    const result = convertClashToSingBox(EXAMPLE, options);
+    singBoxCheck(result.config, "example-tailscale-113", ["1.13.21"], "1.13");
+  });
+
+  it("refuses to convert when the custom ruleset has errors", () => {
+    const { options } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      customRulesMode: "replace",
+      customRules: "proxy suffix:ok.com\nbogus-target suffix:x.com",
+    });
+    // Misrouting is worse than failing, so a bad ruleset must not be guessed at.
+    expect(() => convertClashToSingBox(EXAMPLE, options)).toThrow(/bogus-target/);
+  });
+
+  it("places custom rules before or after the subscription's, as asked", () => {
+    const custom = "direct suffix:corp.internal";
+    const before = convertClashToSingBox(
+      EXAMPLE,
+      normaliseOptions({ ...DEFAULT_OPTIONS, customRulesMode: "before", customRules: custom })
+        .options,
+    ).config.route!.rules!;
+    const after = convertClashToSingBox(
+      EXAMPLE,
+      normaliseOptions({ ...DEFAULT_OPTIONS, customRulesMode: "after", customRules: custom }).options,
+    ).config.route!.rules!;
+
+    const at = (rules: typeof before) =>
+      rules.findIndex((r) => r.domain_suffix?.includes("corp.internal"));
+    // The subscription contributes the bulk of the rules, so "before" must land
+    // much earlier than "after".
+    expect(at(before)).toBeLessThan(at(after));
+  });
+
+  it("warns when a Tailscale auth key would be baked into the link", () => {
+    const { options } = normaliseOptions({
+      ...DEFAULT_OPTIONS,
+      tailscale: true,
+      tailscaleAuthKey: "tskey-auth-abc123",
+    });
+    const result = convertClashToSingBox(EXAMPLE, options);
+    expect(result.warnings.join(" ")).toMatch(/auth key/i);
+  });
 
   it("targeting 1.13 produces a config both lines accept", () => {
     const { options } = normaliseOptions({ ...DEFAULT_OPTIONS, targetVersion: "1.13" });

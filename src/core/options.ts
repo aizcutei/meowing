@@ -58,6 +58,53 @@ export interface ConvertOptions {
   clashApi: boolean;
   logLevel: "trace" | "debug" | "info" | "warn" | "error";
   targetVersion: TargetVersion;
+
+  /* --- Tailscale ------------------------------------------------------- */
+
+  /** Join a tailnet via a `tailscale` endpoint and route tailnet traffic into it. */
+  tailscale: boolean;
+  /**
+   * Pre-authentication key. Optional: without one sing-box prints a login URL on
+   * first start, which is preferable, because this value ends up inside the
+   * subscription link.
+   */
+  tailscaleAuthKey: string;
+  /** Machine name shown in the tailnet. Empty lets Tailscale pick. */
+  tailscaleHostname: string;
+  /** Accept subnet routes advertised by tailnet peers. */
+  tailscaleAcceptRoutes: boolean;
+  /** Route all non-tailnet traffic through this exit node instead of the proxy. */
+  tailscaleExitNode: string;
+  /** Where tailnet identity is persisted. Must be writable and stable across restarts. */
+  tailscaleStateDir: string;
+
+  /* --- DNS ------------------------------------------------------------- */
+
+  /**
+   * `china` replaces `remoteDns`/`localDns` with AliDNS + ByteDance for domestic
+   * names and Google DoT for the rest. `manual` uses the two fields as given.
+   */
+  dnsPreset: "manual" | "china";
+  /**
+   * Query domestic and foreign resolvers concurrently and take the fastest
+   * usable answer. Needs sing-box 1.14; ignored on 1.13.
+   */
+  dnsRace: boolean;
+  /**
+   * Resolve LAN and tailnet names to real addresses, leaving FakeIP for external
+   * domains. Only meaningful together with `fakeIp`.
+   */
+  realIpLocal: boolean;
+
+  /* --- custom routing -------------------------------------------------- */
+
+  /** Routing DSL source; see `custom-rules.ts`. */
+  customRules: string;
+  /**
+   * How `customRules` combines with the subscription's own rules: `before` and
+   * `after` merge, `replace` ignores the subscription's rules entirely.
+   */
+  customRulesMode: "off" | "replace" | "before" | "after";
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {
@@ -85,6 +132,22 @@ export const DEFAULT_OPTIONS: ConvertOptions = {
   clashApi: true,
   logLevel: "info",
   targetVersion: "1.14",
+
+  tailscale: false,
+  tailscaleAuthKey: "",
+  tailscaleHostname: "",
+  tailscaleAcceptRoutes: true,
+  tailscaleExitNode: "",
+  // Relative, so it lands inside sing-box's working/data directory. An absolute
+  // /var/lib path would need root, which breaks desktop runs.
+  tailscaleStateDir: "tailscale",
+
+  dnsPreset: "china",
+  dnsRace: true,
+  realIpLocal: true,
+
+  customRules: "",
+  customRulesMode: "off",
 };
 
 /**
@@ -110,6 +173,20 @@ const KEY_MAP = {
   clashApi: "ca",
   logLevel: "ll",
   targetVersion: "v",
+
+  tailscale: "tl",
+  tailscaleAuthKey: "tk",
+  tailscaleHostname: "th",
+  tailscaleAcceptRoutes: "tr",
+  tailscaleExitNode: "te",
+  tailscaleStateDir: "tsd",
+
+  dnsPreset: "dp",
+  dnsRace: "dr",
+  realIpLocal: "rl",
+
+  customRules: "cu",
+  customRulesMode: "cm",
 } as const satisfies Record<keyof ConvertOptions, string>;
 
 const REVERSE_KEY_MAP = Object.fromEntries(
@@ -158,6 +235,9 @@ function coerce<K extends keyof ConvertOptions>(
   }
 
   const s = typeof raw === "string" ? raw.trim() : undefined;
+  // An empty string is how "not set" arrives for the optional text fields, so for
+  // those it is the default rather than a rejection.
+  if (s === "" && fallback === "") return "" as ConvertOptions[K];
   if (!s) return undefined;
   switch (key) {
     case "tunStack":
@@ -174,6 +254,19 @@ function coerce<K extends keyof ConvertOptions>(
       return s === "proxy" || s === "direct" ? (s as ConvertOptions[K]) : undefined;
     case "targetVersion":
       return s === "1.14" || s === "1.13" ? (s as ConvertOptions[K]) : undefined;
+    case "dnsPreset":
+      return s === "manual" || s === "china" ? (s as ConvertOptions[K]) : undefined;
+    case "customRulesMode":
+      return ["off", "replace", "before", "after"].includes(s) ? (s as ConvertOptions[K]) : undefined;
+    case "tailscaleHostname":
+      // Tailscale itself only accepts DNS-label-ish names.
+      return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(s) ? (s as ConvertOptions[K]) : undefined;
+    case "tailscaleStateDir":
+      return /^[^\s"'\\]+$/.test(s) ? (s as ConvertOptions[K]) : undefined;
+    case "tailscaleAuthKey":
+      return /^[A-Za-z0-9._-]+$/.test(s) ? (s as ConvertOptions[K]) : undefined;
+    case "tailscaleExitNode":
+      return /^[A-Za-z0-9._:-]+$/.test(s) ? (s as ConvertOptions[K]) : undefined;
     case "remoteDns":
     case "localDns":
       // Guard against a DNS field being used to smuggle something odd into the config.
@@ -216,6 +309,12 @@ export function normaliseOptions(input: unknown): {
   if (options.fakeIp && !options.tun) {
     options.fakeIp = false;
     rejected.push("FakeIP needs the TUN inbound; disabled it");
+  }
+  if (options.dnsRace && options.targetVersion === "1.13") {
+    // `evaluate` / `race` DNS actions do not exist before 1.14; 1.13.21 rejects
+    // the config outright rather than ignoring them.
+    options.dnsRace = false;
+    rejected.push("Concurrent DNS needs sing-box 1.14; fell back to rule-based split DNS");
   }
 
   return { options, rejected };
