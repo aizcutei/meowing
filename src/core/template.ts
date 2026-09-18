@@ -174,8 +174,9 @@ export function buildDns(options: ConvertOptions, proxyTag: string): DnsBuildRes
     final: REMOTE_DNS_TAG,
     strategy: options.dnsStrategy,
   };
-  if (options.fakeIp) {
-    // FakeIP addresses must not be cached as if they were real answers.
+  if (options.fakeIp && options.targetVersion === "1.13") {
+    // FakeIP addresses must not be cached as if they were real answers. 1.14 always
+    // keys the cache by transport, which makes the option meaningless and deprecated.
     dns.independent_cache = true;
   }
 

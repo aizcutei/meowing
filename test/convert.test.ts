@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,8 +39,18 @@ const workDir = mkdtempSync(join(tmpdir(), "meowing-"));
  *
  * `versions` defaults to the 1.14 line, because that is what `targetVersion`
  * defaults to and a 1.14-targeted config uses `http_clients`, which 1.13 rejects.
+ *
+ * Deprecation warnings are failures on the version the config targets: sing-box
+ * removes deprecated options two minors later, so emitting one means the output
+ * has a known expiry date. They are tolerated on other lines, since targeting
+ * 1.13 means deliberately using options that 1.14 has since deprecated.
  */
-function singBoxCheck(config: SingBoxConfig, name: string, versions = ["1.14.1"]): void {
+function singBoxCheck(
+  config: SingBoxConfig,
+  name: string,
+  versions = ["1.14.1"],
+  target = "1.14",
+): void {
   const applicable = BINARIES.filter((b) => versions.includes(b.version));
   if (applicable.length === 0) {
     console.warn(`sing-box ${versions.join("/")} not found in .tools/; skipping validation`);
@@ -50,12 +60,22 @@ function singBoxCheck(config: SingBoxConfig, name: string, versions = ["1.14.1"]
   writeFileSync(file, JSON.stringify(config, null, 2));
 
   for (const { version, path } of applicable) {
-    try {
-      execFileSync(path, ["check", "-c", file], { stdio: "pipe" });
-    } catch (err) {
-      const error = err as { stdout?: Buffer; stderr?: Buffer };
-      const output = `${error.stdout?.toString() ?? ""}${error.stderr?.toString() ?? ""}`;
+    // spawnSync, not execFileSync: warnings go to stderr with a zero exit, so
+    // stderr has to be captured on success too.
+    const result = spawnSync(path, ["check", "-c", file], { encoding: "utf8" });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.replace(/\u001B\[[\d;]*m/g, "");
+
+    if (result.status !== 0) {
       throw new Error(`sing-box ${version} rejected "${name}":\n${output}`);
+    }
+    if (version.startsWith(`${target}.`)) {
+      const deprecated = output.split("\n").filter((line) => /deprecated/i.test(line));
+      if (deprecated.length > 0) {
+        throw new Error(
+          `sing-box ${version} reported deprecations for "${name}" (target ${target}):\n` +
+            deprecated.join("\n"),
+        );
+      }
     }
   }
 }
@@ -307,7 +327,7 @@ describe("option variations produce valid configs", () => {
     expect(result.config.http_clients).toBeUndefined();
     expect(result.config.route!.default_http_client).toBeUndefined();
     expect(result.config.route!.rule_set![0]).toHaveProperty("download_detour");
-    singBoxCheck(result.config, "example-compat-113", ["1.14.1", "1.13.21"]);
+    singBoxCheck(result.config, "example-compat-113", ["1.14.1", "1.13.21"], "1.13");
   });
 
   it("targeting 1.14 uses http_clients instead of download_detour", () => {
