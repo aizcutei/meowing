@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.wrangler/
+
+# sing-box binaries used by the test suite; fetch with scripts/fetch-singbox.sh
+.tools/
+
+# Local scratch and secrets
+.dev.vars
+*.local
+.DS_Store
+
+# The bundled example is a real subscription with live credentials.
+clash_example.yaml

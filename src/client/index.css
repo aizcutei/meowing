@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-zinc-950 text-zinc-100 antialiased;
+    /* A subtle wash so large empty areas do not read as a flat black rectangle. */
+    background-image:
+      radial-gradient(60rem 40rem at 15% -10%, oklch(0.35 0.09 250 / 0.35), transparent),
+      radial-gradient(50rem 35rem at 95% 0%, oklch(0.35 0.11 320 / 0.25), transparent);
+    background-repeat: no-repeat;
+  }
+
+  /* Keyboard focus should always be obvious, including on custom controls. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-sky-400;
+  }
+}
+
+@utility card {
+  @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm;
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "meowing",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  // `assets.directory` is intentionally omitted: @cloudflare/vite-plugin wires the
+  // client build output up automatically and errors if the directory is set here.
+  "assets": {
+    "not_found_handling": "single-page-application",
+    // Without this, `not_found_handling` would answer API requests with index.html
+    // instead of letting the Worker handle them.
+    "run_worker_first": ["/api/*", "/sub"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Optional. When set (as a secret, not here), /sub and /api/convert require
+    // `?token=` or an `Authorization: Bearer` header. Empty means open access.
+    "ACCESS_TOKEN": ""
+  }
+}

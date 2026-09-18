@@ -1,0 +1,12 @@
+{
+  // The tests run in Node (they shell out to the real sing-box binary), so they
+  // need Node's globals. Kept separate from the app's tsconfig because
+  // @types/node and @cloudflare/workers-types disagree about several DOM/fetch
+  // types and would conflict if loaded together.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": ["test", "src/core"]
+}
